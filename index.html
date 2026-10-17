@@ -119,6 +119,9 @@ input,select{font-family:inherit;font-size:14px;color:var(--ink)}
 .pops button:hover{background:var(--line2);color:var(--ink)}
 .pops button.del:hover{background:var(--red-bg);color:var(--red)}
 .empty-hint{color:var(--ink3);font-size:13px;padding:14px 4px;width:100%}
+.cloud-status{margin:0 0 12px;padding:9px 11px;border-radius:8px;background:var(--line2);color:var(--ink2);font-size:12px}
+.cloud-status.ok{background:var(--green-bg);color:var(--green)}
+.cloud-status.error{background:var(--red-bg);color:var(--red)}
 
 /* ===== 控制条 ===== */
 .controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
@@ -352,6 +355,7 @@ input,select{font-family:inherit;font-size:14px;color:var(--ink)}
       <button class="btn ghost sm" id="selectAll">全选</button>
       <button class="btn ghost sm" id="selectNone">全不选</button>
     </div>
+    <div class="cloud-status hidden" id="cloudStatus" role="status" aria-live="polite"></div>
     <div class="people-list" id="peopleList"></div>
   </section>
 
@@ -695,6 +699,11 @@ function loadState(){
 /* ---------- 公开云端持久化 ---------- */
 function cloudError(err){ return (err && err.message) || String(err); }
 function cloudReady(){ return !!cloud; }
+function setCloudStatus(kind,message){
+  var status=$('cloudStatus');
+  status.className='cloud-status '+kind;
+  status.textContent=message;
+}
 function canCreateSchedules(){ return true; }
 function canEditSchedules(person){
   return !cloudConfigured || !!(adminUser || teacherUnlocked ||
@@ -783,6 +792,7 @@ async function loadCloudPeople(){
   state.selected={};
   state.people.forEach(function(p){state.selected[p.id]=true;});
   renderAll();
+  setCloudStatus('ok','云端已连接 · '+state.people.length+' 份课表');
 }
 async function loadDepartmentData(){
   var deps=await cloud.from('departments').select('id,name').order('name');
@@ -803,9 +813,11 @@ async function loadDepartmentData(){
 }
 async function initCloud(){
   if(!cloudConfigured) return;
+  setCloudStatus('loading','正在连接云端…');
   $('privacyBadge').textContent='查看免登录 · 上传后仅本人可修改';
   $('refreshCloud').classList.remove('hidden');
   if(!window.supabase || !window.supabase.createClient){
+    setCloudStatus('error','云端组件未加载，请刷新页面后重试。');
     toast('Supabase 客户端加载失败，请检查网络连接。',6000); return;
   }
   adminCloud=window.supabase.createClient(window.CLOUD_CONFIG.url,window.CLOUD_CONFIG.publishableKey,
@@ -815,8 +827,11 @@ async function initCloud(){
   adminCloud.auth.onAuthStateChange(function(event){
     if(event==='PASSWORD_RECOVERY') openAdminPasswordSetup();
   });
-  try{ await loadCloudPeople(); }
-  catch(err){ toast('云端读取失败：'+cloudError(err),6000); }
+  try{ await Promise.race([
+    loadCloudPeople(),
+    new Promise(function(_,reject){setTimeout(function(){reject(new Error('连接超时，请检查手机网络是否能访问云端服务'));},15000);})
+  ]); }
+  catch(err){ setCloudStatus('error','云端读取失败：'+cloudError(err));toast('云端读取失败：'+cloudError(err),6000); }
   var current=await cloud.auth.getUser();
   if(current.data && current.data.user){
     visitorUserId=current.data.user.id;
@@ -1940,9 +1955,10 @@ function bindEvents(){
   });
   $('teacherMask').addEventListener('click',function(e){if(e.target===this) closeTeacherLogin();});
   $('refreshCloud').addEventListener('click',async function(){
-    if(!cloudReady()){toast('云端尚未连接');return;}
+    if(!cloudReady()){setCloudStatus('error','云端组件未连接，请刷新页面后重试。');toast('云端尚未连接');return;}
+    setCloudStatus('loading','正在刷新云端课表…');
     try{await loadCloudPeople();toast('已刷新云端课表');}
-    catch(err){toast('刷新失败：'+cloudError(err),6000);}
+    catch(err){setCloudStatus('error','云端读取失败：'+cloudError(err));toast('刷新失败：'+cloudError(err),6000);}
   });
   var dz=$('dropzone'), fi=$('fileInput');
   dz.addEventListener('click',function(){fi.click();});
