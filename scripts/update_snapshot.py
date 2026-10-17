@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 config = (ROOT / "cloud-config.js").read_text(encoding="utf-8")
-url = re.search(r"url:\s*'([^']+)'", config).group(1)
+url = "https://nmflngzabwirqlantxru.supabase.co"
 key = re.search(r"publishableKey:\s*'([^']+)'", config).group(1)
 
 
