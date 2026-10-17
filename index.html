@@ -244,6 +244,14 @@ input,select{font-family:inherit;font-size:14px;color:var(--ink)}
 .admin-dialog label input{margin-top:4px}
 .admin-error{font-size:12px;color:var(--red)}
 .admin-reset{align-self:flex-start;color:var(--teal);font-size:12px;text-decoration:underline}
+.department-mask{z-index:60}
+.department-dialog{max-width:440px}
+.department-dialog .modal-body{display:flex;flex-direction:column;gap:12px}
+.department-dialog p{font-size:13px;color:var(--ink2);line-height:1.6}
+.department-dialog label{font-size:12px;font-weight:600;color:var(--ink2);display:flex;flex-direction:column;gap:5px}
+.department-dialog select,.department-dialog input{width:100%;min-height:40px;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:#fff}
+.department-dialog .modal-foot{flex-wrap:wrap}
+.department-error{font-size:12px;color:var(--red)}
 .name-row{display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:14px}
 .name-row label{font-size:12.5px;color:var(--ink2);display:flex;flex-direction:column;gap:5px}
 .name-row input{padding:8px 11px;border:1px solid var(--line);border-radius:8px;min-width:200px;min-height:38px}
@@ -345,7 +353,7 @@ input,select{font-family:inherit;font-size:14px;color:var(--ink)}
           <input id="uploadNewDepartmentName" maxlength="60" placeholder="没有对应部门？输入名称" aria-label="新部门名称">
           <button type="button" class="btn sm" id="createUploadDepartment">新建并选中</button>
         </div>
-        <small>本次上传的所有文件和手动新增人员统一归属所选部门。</small>
+        <small>选中部门后，本次上传和手动新增人员统一归属该部门；未选择时会逐人询问。</small>
       </div>
       <button class="btn primary" id="loadDemoBtn">载入 6 人示例课表</button>
       <button class="btn" id="addManualBtn">手动添加一位人员</button>
@@ -459,6 +467,22 @@ input,select{font-family:inherit;font-size:14px;color:var(--ink)}
       <span style="flex:1"></span>
       <button class="btn" id="modalCancel">取消</button>
       <button class="btn primary" id="modalSave">保存课表</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-mask department-mask hidden" id="departmentPromptMask" role="dialog" aria-modal="true" aria-labelledby="departmentPromptTitle">
+  <div class="modal department-dialog">
+    <div class="modal-head"><h3 id="departmentPromptTitle">分配归属部门</h3></div>
+    <div class="modal-body">
+      <p id="departmentPromptMessage"></p>
+      <label>选择已有部门<select id="departmentPromptSelect" aria-label="选择归属部门"></select></label>
+      <label>或新建部门<input id="departmentPromptNew" maxlength="60" placeholder="输入新部门名称" aria-label="新部门名称"></label>
+      <span class="department-error hidden" id="departmentPromptError" role="alert"></span>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" type="button" id="departmentPromptSkip">暂不分配</button>
+      <button class="btn primary" type="button" id="departmentPromptConfirm">确认分配</button>
     </div>
   </div>
 </div>
@@ -1046,6 +1070,24 @@ async function createDepartment(){
   }catch(err){toast('创建部门失败：'+cloudError(err),5000);}
   finally{$('createDepartment').disabled=false;}
 }
+async function findOrCreateUploadDepartment(name){
+  var existing=state.departments.find(function(d){return d.name===name;});
+  if(existing) return existing;
+  if(!adminUser) await ensureVisitorSession();
+  var writer=adminUser?adminCloud:cloud;
+  var result=await writer.from('departments').insert({name:name}).select('id,name').single();
+  if(result.error){
+    if(result.error.code==='23505'){
+      await loadDepartmentData();
+      existing=state.departments.find(function(d){return d.name===name;});
+      if(existing) return existing;
+    }
+    throw result.error;
+  }
+  state.departments.push(result.data);
+  state.departments.sort(function(a,b){return a.name.localeCompare(b.name,'zh-CN');});
+  return result.data;
+}
 async function createUploadDepartment(){
   var input=$('uploadNewDepartmentName'), name=input.value.trim();
   if(!name){toast('请填写部门名称');input.focus();return;}
@@ -1053,29 +1095,56 @@ async function createUploadDepartment(){
   var button=$('createUploadDepartment');
   button.disabled=true;
   try{
-    if(!adminUser) await ensureVisitorSession();
-    var writer=adminUser?adminCloud:cloud;
-    var result=await writer.from('departments').insert({name:name}).select('id,name').single();
-    if(result.error){
-      if(result.error.code==='23505'){
-        var existing=state.departments.find(function(d){return d.name===name;});
-        if(!existing){
-          await loadDepartmentData();
-          renderAll();
-          existing=state.departments.find(function(d){return d.name===name;});
-        }
-        if(existing){$('uploadDepartment').value=existing.id;input.value='';toast('该部门已存在，已为本次上传选中');return;}
-      }
-      throw result.error;
-    }
-    state.departments.push(result.data);
-    state.departments.sort(function(a,b){return a.name.localeCompare(b.name,'zh-CN');});
+    var department=await findOrCreateUploadDepartment(name);
     renderAll();
-    $('uploadDepartment').value=result.data.id;
+    $('uploadDepartment').value=department.id;
     input.value='';
-    toast('已新建并选中部门 '+name);
+    toast('已选中部门 '+name);
   }catch(err){toast('新建部门失败：'+cloudError(err),5000);}
   finally{button.disabled=false;}
+}
+var resolveDepartmentPrompt=null;
+function finishDepartmentPrompt(departmentId){
+  $('departmentPromptMask').classList.add('hidden');
+  var resolve=resolveDepartmentPrompt;
+  resolveDepartmentPrompt=null;
+  if(resolve) resolve(departmentId||'');
+}
+function askDepartmentForPerson(person){
+  return new Promise(function(resolve){
+    resolveDepartmentPrompt=resolve;
+    $('departmentPromptMessage').textContent='「'+person.name+'」的课表尚未分配部门。现在要为这位人员选择归属部门吗？';
+    $('departmentPromptSelect').innerHTML='<option value="">请选择部门</option>'+state.departments.map(function(d){
+      return '<option value="'+esc(d.id)+'">'+esc(d.name)+'</option>';
+    }).join('');
+    $('departmentPromptNew').value='';
+    $('departmentPromptError').classList.add('hidden');
+    $('departmentPromptConfirm').disabled=false;
+    $('departmentPromptSkip').disabled=false;
+    $('departmentPromptMask').classList.remove('hidden');
+    $('departmentPromptSelect').focus();
+  });
+}
+async function confirmDepartmentPrompt(){
+  if(!resolveDepartmentPrompt) return;
+  var name=$('departmentPromptNew').value.trim();
+  var selected=$('departmentPromptSelect').value;
+  var error=$('departmentPromptError');
+  if(!name&&!selected){error.textContent='请选择部门，或输入新部门名称';error.classList.remove('hidden');return;}
+  var button=$('departmentPromptConfirm');
+  button.disabled=true;
+  $('departmentPromptSkip').disabled=true;
+  error.classList.add('hidden');
+  try{
+    var departmentId=selected;
+    if(name){
+      var department=await findOrCreateUploadDepartment(name);
+      departmentId=department.id;
+      renderAll();
+    }
+    finishDepartmentPrompt(departmentId);
+  }catch(err){error.textContent='部门创建失败：'+cloudError(err);error.classList.remove('hidden');}
+  finally{button.disabled=false;$('departmentPromptSkip').disabled=false;}
 }
 async function assignDepartments(ids,departmentId){
   if(!adminUser && !departmentId) throw new Error('请选择归属部门');
@@ -1578,6 +1647,7 @@ async function saveEditor(){
   if(!name){ toast('请填写姓名'); $('pName').focus(); return; }
   var e=state.editing;
   if(!e) return;
+  var uploadDepartmentId=$('uploadDepartment').value;
   e.draft.name=name;
   e.draft.needVerify=false;
   $('modalSave').disabled=true;
@@ -1589,8 +1659,8 @@ async function saveEditor(){
     $('modalSave').disabled=false;
     return;
   }
-  if(e.isNew && $('uploadDepartment').value){
-    try{await assignDepartments([e.draft.cloudId],$('uploadDepartment').value);}
+  if(e.isNew && uploadDepartmentId){
+    try{await assignDepartments([e.draft.cloudId],uploadDepartmentId);}
     catch(err){assignmentError=cloudError(err);}
   }
   if(e.isNew){
@@ -1602,7 +1672,16 @@ async function saveEditor(){
     state.selected[e.draft.id]=true;
   }
   $('modalSave').disabled=false;
-  closeEditor(); renderAll(); toast(assignmentError?'课表已保存，但部门归属失败：'+assignmentError:'已保存 '+name+' 的课表',assignmentError?6000:3000);
+  closeEditor(); renderAll();
+  if(e.isNew && e.draft.cloudId && state.departmentReady && !snapshotMode && !state.assignments[e.draft.cloudId]){
+    var chosen=await askDepartmentForPerson(e.draft);
+    if(chosen){
+      try{await assignDepartments([e.draft.cloudId],chosen);assignmentError=null;}
+      catch(err){assignmentError=cloudError(err);}
+      renderAll();
+    }
+  }
+  toast(assignmentError?'课表已保存，但部门归属失败：'+assignmentError:'已保存 '+name+' 的课表',assignmentError?6000:3000);
 }
 async function deleteEditingPerson(){
   if(!state.editing || !canEditSchedules(state.editing.draft)){toast('只能删除自己上传的课表');return;}
@@ -1950,6 +2029,14 @@ async function runQueue(){
             try{await assignDepartments([person.cloudId],item.departmentId);}
             catch(departmentErr){person.departmentError=cloudError(departmentErr);}
           }
+          if(state.departmentReady && !snapshotMode && !state.assignments[person.cloudId]){
+            setProgress(f,'课表已保存，等待确认归属部门…',90);
+            var chosen=await askDepartmentForPerson(person);
+            if(chosen){
+              try{await assignDepartments([person.cloudId],chosen);delete person.departmentError;}
+              catch(departmentErr){person.departmentError=cloudError(departmentErr);}
+            }
+          }
         }
         catch(saveErr){person.pendingFile=f; person.cloudError=cloudError(saveErr);}
       }
@@ -1965,7 +2052,7 @@ async function runQueue(){
   if(added.length){
     state.departmentFilter='all';
     renderAll();
-    toast('已识别 '+added.length+' 人，请逐一核对课表'+(added.some(function(p){return p.cloudError;})?'；部分云端保存失败，请编辑重试':'')+(added.some(function(p){return p.departmentError;})?'；部分部门归属失败，请在部门管理中补录':''),5000);
+    toast('已识别 '+added.length+' 人，请逐一核对课表'+(added.some(function(p){return p.cloudError;})?'；部分云端保存失败，请编辑重试':'')+(added.some(function(p){return p.departmentError;})?'；部分部门归属失败，请联系管理员':''),5000);
     var first=state.people.filter(function(p){return p.id===added[0].id;})[0];
     if(first) openEditor(first, first.warn||'自动识别结果可能有误差，请逐格核对课程名称与周次后再保存。');
   }else{
@@ -2007,6 +2094,15 @@ function bindEvents(){
   $('newDepartmentName').addEventListener('keydown',function(e){if(e.key==='Enter') createDepartment();});
   $('createUploadDepartment').addEventListener('click',createUploadDepartment);
   $('uploadNewDepartmentName').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();createUploadDepartment();}});
+  $('departmentPromptSkip').addEventListener('click',function(){finishDepartmentPrompt('');});
+  $('departmentPromptConfirm').addEventListener('click',confirmDepartmentPrompt);
+  $('departmentPromptNew').addEventListener('keydown',function(e){
+    if(e.key==='Enter'){e.preventDefault();confirmDepartmentPrompt();}
+    if(e.key==='Escape'&&!$('departmentPromptSkip').disabled) finishDepartmentPrompt('');
+  });
+  $('departmentPromptSelect').addEventListener('keydown',function(e){
+    if(e.key==='Escape'&&!$('departmentPromptSkip').disabled) finishDepartmentPrompt('');
+  });
   $('adminSearch').addEventListener('input',renderAdminRows);
   $('adminRows').addEventListener('change',function(e){
     if(!e.target.matches('input[data-schedule]')) return;
