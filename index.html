@@ -1726,8 +1726,58 @@ function cluster1D(vals, tol){
 }
 function median(arr){ if(!arr.length) return null; var s=arr.slice().sort(function(a,b){return a-b;}); return s[Math.floor(s.length/2)]; }
 
+/* 表格线兜底：文字 OCR 漏掉“星期”表头时，按完整的横竖线定位格子。 */
+function tableGeometry(source){
+  var canvas=document.createElement('canvas');
+  canvas.width=source.naturalWidth||source.width;
+  canvas.height=source.naturalHeight||source.height;
+  var w=canvas.width,h=canvas.height;
+  if(w<500||h<450) return null;
+  var ctx=canvas.getContext('2d',{willReadFrequently:true});
+  ctx.drawImage(source,0,0);
+  var px=ctx.getImageData(0,0,w,h).data;
+  function dark(x,y){var k=(y*w+x)*4;return px[k]+px[k+1]+px[k+2]<540;}
+  function linePositions(vertical){
+    var length=vertical?w:h, across=vertical?h:w;
+    var lo=Math.round(across*(vertical?0.07:0.03));
+    var hi=Math.round(across*(vertical?0.94:0.97));
+    var hits=[];
+    for(var p=0;p<length;p++){
+      var n=0,total=0;
+      for(var q=lo;q<hi;q+=3){total++;if(vertical?dark(p,q):dark(q,p))n++;}
+      if(n/total>0.66)hits.push(p);
+    }
+    return cluster1D(hits,3);
+  }
+  function regularRun(lines,minGap,maxGap,minLines,maxLines){
+    var best=[];
+    for(var i=0;i<lines.length-1;i++){
+      var gap=lines[i+1]-lines[i];
+      if(gap<minGap||gap>maxGap)continue;
+      var run=[lines[i],lines[i+1]];
+      for(var j=i+2;j<lines.length&&run.length<maxLines;j++){
+        var delta=lines[j]-run[run.length-1];
+        if(Math.abs(delta-gap)>gap*0.18)break;
+        run.push(lines[j]);
+      }
+      if(run.length>=minLines&&run.length>best.length)best=run;
+    }
+    return best;
+  }
+  var cols=regularRun(linePositions(true),w*0.09,w*0.30,6,9);
+  var rows=regularRun(linePositions(false),h*0.07,h*0.25,7,8);
+  // 5/7 天课表左侧还有一列“节次”，它常与星期列等宽。
+  if(cols.length===7||cols.length===9)cols=cols.slice(1);
+  if(cols.length<6||rows.length<7)return null;
+  var slotGroups=rows.length===7?[[0],[1],[3],[4],[5],[6]]:[[0],[1],[2],[3],[4],[5],[6]];
+  return {
+    colBands:cols.slice(0,-1).map(function(x,i){return {l:x+2,r:cols[i+1]-1,col:i};}),
+    rowBands:rows.slice(0,-1).map(function(y,i){return {l:y+2,r:rows[i+1]-1,slots:slotGroups[i],maybeFifth:rows.length===7&&i===1};})
+  };
+}
+
 /* tokens: [{text,x0,y0,x1,y1,cx,cy,h}] → {name,grid,warn,courseCount} */
-function buildGrid(tokens, fileName){
+function buildGrid(tokens, fileName, geometry){
   var warn='';
   var colToks=tokens.filter(function(t){
     var x=t.text.trim();
@@ -1745,7 +1795,7 @@ function buildGrid(tokens, fileName){
       colCenters.splice(mi-1,2,(colCenters[mi]+colCenters[mi-1])/2);
     }
   }
-  var firstLeft = colCenters.length ? colCenters[0]-(colCenters[1]-colCenters[0])*0.55 : Infinity;
+  var firstLeft = geometry ? geometry.colBands[0].l : (colCenters.length ? colCenters[0]-(colCenters[1]-colCenters[0])*0.55 : Infinity);
   var slotRows={0:[],1:[],2:[],3:[],4:[],5:[],6:[]};
   tokens.forEach(function(t){
     if(t.cx>=firstLeft) return;
@@ -1763,17 +1813,17 @@ function buildGrid(tokens, fileName){
       else if(hi<7) slotCy[s2]=slotCy[hi]-(hi-s2)*30;
     }
   }
-  if(colCenters.length<5 || (slotRows[0].length===0 && slotRows[3].length===0)){
+  if(!geometry && (colCenters.length<5 || (slotRows[0].length===0 && slotRows[3].length===0))){
     return {name:guessNameFromTokens(tokens,fileName), grid:emptyGrid(), warn:'未能定位课表网格（表头或节次识别不全），请手动补录，或换更清晰的原图。', courseCount:0};
   }
-  var colBands=colCenters.map(function(c,i){
+  var colBands=geometry ? geometry.colBands : colCenters.map(function(c,i){
     var l = i===0 ? c-(colCenters[1]-c)/2 : (c+colCenters[i-1])/2;
     var r = i===colCenters.length-1 ? c+(c-colCenters[i-1])/2 : (colCenters[i+1]+c)/2;
     return {l:l,r:r,col:i};
   });
   var cyOrder=slotCy.map(function(cy,sl){return {cy:cy,sl:sl};}).sort(function(a,b){return a.cy-b.cy;});
-  var dir = slotCy[0] > slotCy[6] ? -1 : 1;
-  var rowBands=cyOrder.map(function(o,i){
+  var dir = geometry ? 1 : (slotCy[0] > slotCy[6] ? -1 : 1);
+  var rowBands=geometry ? geometry.rowBands : cyOrder.map(function(o,i){
     var l = i===0 ? o.cy-(cyOrder[1].cy-o.cy)/2 : (o.cy+cyOrder[i-1].cy)/2;
     var r = i===cyOrder.length-1 ? o.cy+(o.cy-cyOrder[i-1].cy)/2 : (cyOrder[i+1].cy+o.cy)/2;
     return {l:l,r:r,slot:o.sl};
@@ -1786,10 +1836,13 @@ function buildGrid(tokens, fileName){
     var cb=null; for(var i=0;i<colBands.length;i++){ if(t.cx>=colBands[i].l&&t.cx<colBands[i].r){cb=colBands[i];break;} }
     var rb=null; for(var j=0;j<rowBands.length;j++){ if(t.cy>=rowBands[j].l&&t.cy<rowBands[j].r){rb=rowBands[j];break;} }
     if(!cb||!rb) return;
-    if(rb.slot===2) return; // 第5节（午间）学校统一不排课，忽略落入该窄带的班级/教师碎片
-    var key=cb.col+'_'+rb.slot;
-    if(!cellTok[key]) cellTok[key]=[];
-    cellTok[key].push(t);
+    var slots=rb.slots||[rb.slot];
+    slots.forEach(function(slot){
+      if(!geometry && slot===2)return; // 文字坐标模式中，这一窄带常混入相邻格的碎片
+      var key=cb.col+'_'+slot;
+      if(!cellTok[key]) cellTok[key]=[];
+      cellTok[key].push(t);
+    });
   });
   var courseCount=0;
   Object.keys(cellTok).forEach(function(key){
@@ -1877,14 +1930,16 @@ function guessNameFromTokens(tokens, fileName){
     r.toks.sort(function(a,b){return a.cx-b.cx;});
     r.text=r.toks.map(function(t){return t.text;}).join('');
   });
-  var topRows=rows.slice().sort(function(a,b){return b.cy-a.cy;});
+  // 图片坐标自上而下，PDF 文本坐标自下而上；两端都检查。
+  var orderedRows=rows.slice().sort(function(a,b){return a.cy-b.cy;});
+  var topRows=orderedRows.slice(0,6).concat(orderedRows.slice(-6).reverse());
   // 先严格匹配「XXX的课表」，避免与「2026-2027年第1学期」聚在同一行时贪婪截断
   function cleanName(s){ return (s||'').replace(/^.*学期/,'').replace(/^.*学年/,''); }
-  for(var i=0;i<Math.min(6,topRows.length);i++){
+  for(var i=0;i<topRows.length;i++){
     var ms=topRows[i].text.match(/([一-龥]{2,5})\s*的\s*课\s*表/);
     if(ms && cleanName(ms[1])) return cleanName(ms[1]);
   }
-  for(var j=0;j<Math.min(6,topRows.length);j++){
+  for(var j=0;j<topRows.length;j++){
     var m=topRows[j].text.match(/([一-龥]{2,5})\s*[的旳]?\s*课\s*表?/);
     var cn=cleanName(m&&m[1]);
     if(cn && cn!=='星期') return cn;
@@ -1905,6 +1960,8 @@ async function parsePDF(file, onProgress){
   for(var pi=1;pi<=pdf.numPages;pi++){
     var page=await pdf.getPage(pi);
     var tc=await page.getTextContent();
+    var geometry=null;
+    var raster=null;
     var tokens=tc.items.filter(function(it){return it.str&&it.str.trim();}).map(function(it){
       var x=it.transform[4], y=it.transform[5], h=it.height||9, w=it.width||5;
       return {text:it.str, x0:x, y0:y, x1:x+w, y1:y+h, cx:x+w/2, cy:y+h/2, h:h};
@@ -1915,9 +1972,11 @@ async function parsePDF(file, onProgress){
       var vp=page.getViewport({scale:2.2}), canvas=document.createElement('canvas');
       canvas.width=vp.width; canvas.height=vp.height;
       await page.render({canvasContext:canvas.getContext('2d'), viewport:vp}).promise;
+      raster=canvas;
       tokens=await ocrTokens(canvas, onProgress);
+      geometry=tableGeometry(canvas);
     }
-    var res=buildGrid(tokens, file.name);
+    var res=geometry ? await ocrGridCells(raster,geometry,tokens,file.name,onProgress) : buildGrid(tokens,file.name);
     if(!name || /新人员/.test(name)) name=res.name;
     for(var d=0;d<7;d++) for(var s=0;s<7;s++) res.grid[d][s].forEach(function(c){merged[d][s].push(c);totalCourses++;});
   }
@@ -1961,14 +2020,57 @@ async function ocrTokens(source, onProgress){
   onProgress&&onProgress('正在归位课程…', 88);
   return ocrTokensFromData(ret.data);
 }
+async function ocrGridCells(source, geometry, tokens, fileName, onProgress){
+  var worker=await getOCRWorker(onProgress);
+  var grid=emptyGrid(), occupied=[], uncertain=0, courseCount=0;
+  geometry.rowBands.forEach(function(row){
+    geometry.colBands.forEach(function(col){
+      var x=Math.ceil(col.l+2),y=Math.ceil(row.l+2);
+      var width=Math.floor(col.r-col.l-4),height=Math.floor(row.r-row.l-4);
+      if(width<30||height<25)return;
+      var sample=document.createElement('canvas');
+      sample.width=width;sample.height=height;
+      var context=sample.getContext('2d',{willReadFrequently:true});
+      context.drawImage(source,x,y,width,height,0,0,width,height);
+      var pixels=context.getImageData(0,0,width,height).data, dark=0;
+      for(var k=0;k<pixels.length;k+=4){if(pixels[k]+pixels[k+1]+pixels[k+2]<540)dark++;}
+      if(dark/(width*height)>0.012)occupied.push({row:row,col:col,x:x,y:y,width:width,height:height});
+    });
+  });
+  for(var i=0;i<occupied.length;i++){
+    var cell=occupied[i], crop=document.createElement('canvas');
+    crop.width=cell.width*2;crop.height=cell.height*2;
+    var ctx=crop.getContext('2d');
+    ctx.imageSmoothingQuality='high';
+    ctx.filter='grayscale(1) contrast(1.3)';
+    ctx.drawImage(source,cell.x,cell.y,cell.width,cell.height,0,0,crop.width,crop.height);
+    onProgress&&onProgress('逐格识别课程 '+(i+1)+'/'+occupied.length+'…',45+Math.round(43*(i+1)/occupied.length));
+    var result=await worker.recognize(crop);
+    var flat=(result.data.text||'').replace(/\s+/g,'');
+    var courses=fieldsToCourses(flat);
+    var hasWeeks=/\d{1,2}\s*[-~—]\s*\d{1,2}\s*周|第?\d{1,2}\s*周|单周|双周/.test(flat);
+    if(!courses.length||!hasWeeks){
+      courses=[{name:'待核对：课程或周次识别不清',weeks:allWeeks()}];
+      uncertain++;
+    }
+    var slots=cell.row.slots.slice();
+    if(cell.row.maybeFifth&&/[（(]?3\s*[-~—]\s*5\s*节/.test(flat))slots.push(2);
+    slots.forEach(function(slot){
+      courses.forEach(function(course){grid[cell.col.col][slot].push(course);courseCount++;});
+    });
+  }
+  return {name:guessNameFromTokens(tokens,fileName),grid:grid,courseCount:courseCount,
+    warn:uncertain?'有 '+uncertain+' 格文字或周次未读清，已标“待核对”；请对照原图逐格修正后保存。':''};
+}
 async function parseImage(file, onProgress){
   var url=URL.createObjectURL(file);
   try{
     var img=new Image();
     await new Promise(function(res,rej){ img.onload=res; img.onerror=rej; img.src=url; });
     var tokens=await ocrTokens(img, onProgress);
-    var res=buildGrid(tokens, file.name);
-    var warn = res.courseCount ? '图片为 OCR 识别，密集表格可能有漏字或周次错误，请逐格核对。' : res.warn;
+    var geometry=tableGeometry(img);
+    var res=geometry ? await ocrGridCells(img,geometry,tokens,file.name,onProgress) : buildGrid(tokens,file.name);
+    var warn = res.courseCount ? '已逐格放大识别。'+(res.warn||'请对照原图核对课程名称、节次和周次后保存。') : res.warn;
     return {id:uid(), name:res.name, cls:'', grid:res.grid, source:file.name, needVerify:true, warn:warn, courseCount:res.courseCount||0};
   }finally{ URL.revokeObjectURL(url); }
 }
