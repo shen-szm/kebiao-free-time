@@ -493,7 +493,7 @@ input,select{font-family:inherit;font-size:14px;color:var(--ink)}
 <script src="vendor/pdfjs/pdf.min.js"></script>
 <script src="vendor/tesseract/tesseract.min.js"></script>
 <script src="vendor/supabase.min.js"></script>
-<script src="cloud-config.js"></script>
+<script src="cloud-config.js?v=20261017-5"></script>
 <script>
 /* ============================================================
  * 课表空档 —— 纯前端课表识别与共同空闲分析
@@ -812,7 +812,10 @@ async function loadDepartmentData(){
       && !state.departments.some(function(d){return d.id===state.departmentFilter;})) state.departmentFilter='all';
 }
 async function initCloud(){
-  if(!cloudConfigured) return;
+  if(!cloudConfigured){
+    setCloudStatus('error','云端配置未加载。请刷新页面；如果仍出现此提示，请将截图发给管理员。');
+    return;
+  }
   setCloudStatus('loading','正在连接云端…');
   $('privacyBadge').textContent='查看免登录 · 上传后仅本人可修改';
   $('refreshCloud').classList.remove('hidden');
