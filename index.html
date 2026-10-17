@@ -486,8 +486,8 @@ input,select{font-family:inherit;font-size:14px;color:var(--ink)}
 
 <div class="toast hidden" id="toast"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script src="vendor/pdfjs/pdf.min.js"></script>
+<script src="vendor/tesseract/tesseract.min.js"></script>
 <script src="vendor/supabase.min.js"></script>
 <script src="cloud-config.js"></script>
 <script>
@@ -1713,7 +1713,7 @@ function guessNameFromTokens(tokens, fileName){
 
 /* ---------- PDF ---------- */
 if(window.pdfjsLib){
-  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+  pdfjsLib.GlobalWorkerOptions.workerSrc='vendor/pdfjs/pdf.worker.min.js';
 }
 async function parsePDF(file, onProgress){
   onProgress&&onProgress('正在解析 PDF 文本…', 20);
@@ -1750,7 +1750,7 @@ async function getOCRWorker(onLog){
   if(_ocrWorker) return _ocrWorker;
   onLog&&onLog('首次识别需下载中文语言包（约 10MB），请稍候…', 5);
   _ocrWorker = await Tesseract.createWorker(['chi_sim','eng'], 1, {
-    workerPath:'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js',
+    workerPath:'vendor/tesseract/worker.min.js',
     corePath:'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1/',
     langPath:'https://tessdata.projectnaptha.com/4.0.0'
   });
