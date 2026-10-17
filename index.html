@@ -740,7 +740,7 @@ function setCloudStatus(kind,message){
 }
 function canCreateSchedules(){ return !snapshotMode; }
 function canEditSchedules(person){
-  return !snapshotMode && (!cloudConfigured || !!(adminUser || teacherUnlocked ||
+  return !snapshotMode && (!cloudConfigured || !!(person && person.needVerify && !person.cloudId) || !!(adminUser || teacherUnlocked ||
     (person && visitorUserId && person.ownerId===visitorUserId)));
 }
 function editorCloud(){ return adminUser ? adminCloud : cloud; }
@@ -811,6 +811,7 @@ async function removePerson(person){
 }
 async function loadCloudPeople(){
   if(!cloudReady()) return;
+  var pending=state.people.filter(function(p){return p.needVerify&&!p.cloudId;});
   var rows=[], offset=0, page;
   do{
     page=await cloud.from('schedules').select('id,owner_id,name,cls,data,source,source_path')
@@ -822,11 +823,11 @@ async function loadCloudPeople(){
   state.people=rows.map(function(r){return {
     id:r.id, cloudId:r.id, ownerId:r.owner_id||null, name:r.name, cls:r.cls||'', grid:r.data,
     source:r.source||'', sourcePath:r.source_path||null
-  };});
+  };}).concat(pending);
   try{await loadDepartmentData();}
   catch(err){state.departmentReady=false;toast('部门读取失败：'+cloudError(err),5000);}
   state.selected={};
-  state.people.forEach(function(p){state.selected[p.id]=true;});
+  state.people.forEach(function(p){state.selected[p.id]=!p.needVerify;});
   snapshotMode=false;
   $('privacyBadge').textContent='查看免登录 · 上传后仅本人可修改';
   renderAll();
@@ -1259,7 +1260,7 @@ function toast(msg, ms){
   var t=$('toast'); t.textContent=msg; t.classList.remove('hidden');
   clearTimeout(t._timer); t._timer=setTimeout(function(){t.classList.add('hidden');}, ms||2600);
 }
-function selectedPeople(){ return visiblePeople().filter(function(p){return state.selected[p.id];}); }
+function selectedPeople(){ return visiblePeople().filter(function(p){return state.selected[p.id]&&!p.needVerify;}); }
 
 /* ---------- 周次模式 ---------- */
 function activeWeeks(){
@@ -1274,7 +1275,8 @@ function modeLabel(){
   if(state.weekMode==='all') return '全学期（第1-17周）概览';
   if(state.weekMode==='odd') return '单周（第1、3、5…周）';
   if(state.weekMode==='even') return '双周（第2、4、6…周）';
-  return '第'+state.weekMode+'周（'+weekDateLabel(Number(state.weekMode))+'）';
+  var week=Number(state.weekMode);
+  return '第'+week+'周（'+(week%2?'单周':'双周')+'，'+weekDateLabel(week)+'）';
 }
 
 /* 某格在所选人员、所选周次条件下的空闲计算 */
@@ -1339,7 +1341,7 @@ function renderPeople(){
     return '<div class="person-chip'+(on?' on':'')+'" data-id="'+p.id+'">'
       + '<span class="pcheck"><svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>'
       + '<span class="pinfo"><span class="pn">'+esc(p.name)+'</span>'
-      + '<span class="pc">'+countCourses(p)+' 门课'+(p.cls?' · '+esc(p.cls):'')+(state.departmentReady?' · '+esc(departmentName(state.assignments[p.cloudId||p.id])):'')+(p.needVerify?' · <span style="color:var(--amber);font-weight:600">待核对</span>':'')+(p.cloudError?' · <span style="color:var(--red);font-weight:600">云端未保存</span>':'')+(p.departmentError?' · <span style="color:var(--red);font-weight:600">部门归属失败</span>':'')+'</span></span>'
+      + '<span class="pc">'+countCourses(p)+' 门课'+(p.cls?' · '+esc(p.cls):'')+(state.departmentReady?' · '+esc(departmentName(state.assignments[p.cloudId||p.id])):'')+(p.needVerify?' · <span style="color:var(--amber);font-weight:600">待核对，未发布</span>':'')+(p.cloudError?' · <span style="color:var(--red);font-weight:600">云端未保存</span>':'')+(p.departmentError?' · <span style="color:var(--red);font-weight:600">部门归属失败</span>':'')+'</span></span>'
       + '<span class="pops">'
       + (p.sourcePath?'<button data-act="file" title="下载原始课表" aria-label="下载原始课表">原件</button>':'')
       + (canEditSchedules(p)?'<button data-act="edit" title="核对 / 编辑课表"><svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M4 20h4L19 9l-4-4L4 16v4z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 6l4 4" stroke="currentColor" stroke-width="1.6"/></svg></button>'
@@ -1471,7 +1473,9 @@ function renderDetail(d, s){
   sel.forEach(function(p){
     var cs=chosenWeek?p.grid[d][s].filter(function(c){return !!c.weeks[chosenWeek];}):p.grid[d][s];
     if(!cs.length){
-      html+='<div class="cd-person free-p"><div class="cdp-head"><svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>'+esc(p.name)+'　空闲</div></div>';
+      var otherWeeks=chosenWeek?p.grid[d][s].filter(function(c){return !c.weeks[chosenWeek];}):[];
+      html+='<div class="cd-person free-p"><div class="cdp-head"><svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 7" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>'+esc(p.name)+'　空闲</div>'
+        +(otherWeeks.length?otherWeeks.map(function(c){return '<div class="cdp-course" style="color:var(--ink3)">'+esc(c.name)+'：'+esc(weeksToText(c.weeks))+'有课，本周不上</div>';}).join(''):'')+'</div>';
     }else{
       html+='<div class="cd-person"><div class="cdp-head">'+esc(p.name)+'</div>'
         + cs.map(function(c){return '<div class="cdp-course">'+esc(c.name)+(chosenWeek?'':' <span style="color:var(--ink3)">'+weeksToText(c.weeks)+'</span>')+'</div>';}).join('')
@@ -1647,9 +1651,9 @@ async function saveEditor(){
   if(!name){ toast('请填写姓名'); $('pName').focus(); return; }
   var e=state.editing;
   if(!e) return;
-  var uploadDepartmentId=$('uploadDepartment').value;
+  var uploadDepartmentId=e.draft.pendingDepartmentId||$('uploadDepartment').value;
+  var firstSave=!e.draft.cloudId;
   e.draft.name=name;
-  e.draft.needVerify=false;
   $('modalSave').disabled=true;
   var assignmentError=null;
   try{
@@ -1659,7 +1663,9 @@ async function saveEditor(){
     $('modalSave').disabled=false;
     return;
   }
-  if(e.isNew && uploadDepartmentId){
+  e.draft.needVerify=false;
+  delete e.draft.pendingDepartmentId;
+  if(firstSave && uploadDepartmentId){
     try{await assignDepartments([e.draft.cloudId],uploadDepartmentId);}
     catch(err){assignmentError=cloudError(err);}
   }
@@ -1673,7 +1679,7 @@ async function saveEditor(){
   }
   $('modalSave').disabled=false;
   closeEditor(); renderAll();
-  if(e.isNew && e.draft.cloudId && state.departmentReady && !snapshotMode && !state.assignments[e.draft.cloudId]){
+  if(firstSave && e.draft.cloudId && state.departmentReady && !snapshotMode && !state.assignments[e.draft.cloudId]){
     var chosen=await askDepartmentForPerson(e.draft);
     if(chosen){
       try{await assignDepartments([e.draft.cloudId],chosen);assignmentError=null;}
@@ -1757,7 +1763,7 @@ function buildGrid(tokens, fileName){
       else if(hi<7) slotCy[s2]=slotCy[hi]-(hi-s2)*30;
     }
   }
-  if(colCenters.length<7 || (slotRows[0].length===0 && slotRows[3].length===0)){
+  if(colCenters.length<5 || (slotRows[0].length===0 && slotRows[3].length===0)){
     return {name:guessNameFromTokens(tokens,fileName), grid:emptyGrid(), warn:'未能定位课表网格（表头或节次识别不全），请手动补录，或换更清晰的原图。', courseCount:0};
   }
   var colBands=colCenters.map(function(c,i){
@@ -2023,26 +2029,12 @@ async function runQueue(){
       var base=person.name, n=2;
       while(state.people.some(function(p){return p.name===person.name;})) person.name=base+'('+(n++)+')';
       if(cloudConfigured){
-        try{
-          await persistPerson(person,f);
-          if(item.departmentId){
-            try{await assignDepartments([person.cloudId],item.departmentId);}
-            catch(departmentErr){person.departmentError=cloudError(departmentErr);}
-          }
-          if(state.departmentReady && !snapshotMode && !state.assignments[person.cloudId]){
-            setProgress(f,'课表已保存，等待确认归属部门…',90);
-            var chosen=await askDepartmentForPerson(person);
-            if(chosen){
-              try{await assignDepartments([person.cloudId],chosen);delete person.departmentError;}
-              catch(departmentErr){person.departmentError=cloudError(departmentErr);}
-            }
-          }
-        }
-        catch(saveErr){person.pendingFile=f; person.cloudError=cloudError(saveErr);}
+        person.pendingFile=f;
+        person.pendingDepartmentId=item.departmentId;
       }
-      state.people.push(person); state.selected[person.id]=true;
+      state.people.push(person); state.selected[person.id]=!cloudConfigured;
       added.push(person);
-      setProgress(f,person.cloudError?'识别成功，云端保存失败，请编辑重试':person.departmentError?'云端保存成功，部门归属失败，请联系管理员':(cloudConfigured?'已识别并保存 ':'已识别 ')+person.courseCount+' 门课 → '+person.name,100,person.cloudError||person.departmentError?'err':'done');
+      setProgress(f,'已识别 '+person.courseCount+' 门课 → '+person.name+(cloudConfigured?'；核对后保存到云端':''),100,'done');
       renderPeople(); saveState();
     }catch(err){
       setProgress(f,'识别失败：'+(err.message||err),0,'err');
@@ -2052,9 +2044,9 @@ async function runQueue(){
   if(added.length){
     state.departmentFilter='all';
     renderAll();
-    toast('已识别 '+added.length+' 人，请逐一核对课表'+(added.some(function(p){return p.cloudError;})?'；部分云端保存失败，请编辑重试':'')+(added.some(function(p){return p.departmentError;})?'；部分部门归属失败，请联系管理员':''),5000);
+    toast('已识别 '+added.length+' 人，请逐一核对课表并点击保存；未确认的内容不会计入共同空闲',5000);
     var first=state.people.filter(function(p){return p.id===added[0].id;})[0];
-    if(first) openEditor(first, first.warn||'自动识别结果可能有误差，请逐格核对课程名称与周次后再保存。');
+    if(first) openEditor(first, (first.warn||'自动识别结果可能有误差，请逐格核对课程名称与周次。')+' 确认后点击“保存”，才会发布到云端；关闭或刷新页面会丢失未保存的识别结果。');
   }else{
     toast('文件处理完成，但没有识别出课表，可手动添加或换更清晰的文件', 3800);
   }
