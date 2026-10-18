@@ -801,8 +801,14 @@ async function removePerson(person){
   if(!cloudReady()) throw new Error('云端尚未连接');
   var writer=editorCloud();
   if(person.cloudId){
-    var deleted=await writer.from('schedules').delete().eq('id',person.cloudId).select('id').single();
+    var deleted=await writer.from('schedules').delete().eq('id',person.cloudId).select('id');
     if(deleted.error) throw deleted.error;
+    if(!deleted.data || deleted.data.length!==1){
+      var current=await cloud.from('schedules').select('id').eq('id',person.cloudId).maybeSingle();
+      if(current.error) throw current.error;
+      if(current.data) throw new Error('课表仍在云端，但删除请求未获权限。请重新登录管理员或使用最初上传的浏览器；若仍失败，需要检查云端删除策略。');
+      throw new Error('这份课表已不在云端。请点击“刷新云端”更新名单后再操作。');
+    }
   }
   if(person.sourcePath){
     var removed=await writer.storage.from('schedule-files').remove([person.sourcePath]);
@@ -2020,6 +2026,13 @@ async function ocrTokens(source, onProgress){
   onProgress&&onProgress('正在归位课程…', 88);
   return ocrTokensFromData(ret.data);
 }
+function cellTextQuality(data){
+  var text=(data.text||'').replace(/\s+/g,'');
+  var hasWeek=/\d{1,2}\s*[-~—]\s*\d{1,2}\s*周|第?\d{1,2}\s*周|单周|双周/.test(text);
+  var han=(text.match(/[一-龥]/g)||[]).length;
+  // 周次和中文课程名比单纯的 OCR 置信度更重要；置信度只用于两个有效结果之间的选择。
+  return (hasWeek?100:0)+Math.min(han,20)+(Number(data.confidence)||0)/20;
+}
 async function ocrGridCells(source, geometry, tokens, fileName, onProgress){
   var worker=await getOCRWorker(onProgress);
   var grid=emptyGrid(), occupied=[], uncertain=0, courseCount=0;
@@ -2034,7 +2047,7 @@ async function ocrGridCells(source, geometry, tokens, fileName, onProgress){
       context.drawImage(source,x,y,width,height,0,0,width,height);
       var pixels=context.getImageData(0,0,width,height).data, dark=0;
       for(var k=0;k<pixels.length;k+=4){if(pixels[k]+pixels[k+1]+pixels[k+2]<540)dark++;}
-      if(dark/(width*height)>0.012)occupied.push({row:row,col:col,x:x,y:y,width:width,height:height});
+      if(dark/(width*height)>0.008)occupied.push({row:row,col:col,x:x,y:y,width:width,height:height});
     });
   });
   for(var i=0;i<occupied.length;i++){
@@ -2047,6 +2060,18 @@ async function ocrGridCells(source, geometry, tokens, fileName, onProgress){
     onProgress&&onProgress('逐格识别课程 '+(i+1)+'/'+occupied.length+'…',45+Math.round(43*(i+1)/occupied.length));
     var result=await worker.recognize(crop);
     var flat=(result.data.text||'').replace(/\s+/g,'');
+    // 对没有清楚读出周次、或置信度较低的格子，再用保留细笔画的图像重读。
+    // 表格位置仍由网格线决定，不让 OCR 的坐标误差把周五课程挪到别的列。
+    if(cellTextQuality(result.data)<112 || (Number(result.data.confidence)||0)<70){
+      var alternate=document.createElement('canvas');
+      alternate.width=cell.width*3;alternate.height=cell.height*3;
+      var altCtx=alternate.getContext('2d');
+      altCtx.imageSmoothingQuality='high';
+      altCtx.filter='grayscale(1) contrast(1.08)';
+      altCtx.drawImage(source,cell.x,cell.y,cell.width,cell.height,0,0,alternate.width,alternate.height);
+      var retry=await worker.recognize(alternate);
+      if(cellTextQuality(retry.data)>cellTextQuality(result.data)) flat=(retry.data.text||'').replace(/\s+/g,'');
+    }
     var courses=fieldsToCourses(flat);
     var hasWeeks=/\d{1,2}\s*[-~—]\s*\d{1,2}\s*周|第?\d{1,2}\s*周|单周|双周/.test(flat);
     if(!courses.length||!hasWeeks){
