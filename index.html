@@ -598,7 +598,7 @@ function parseWeeks(raw){
   if(!any && parity){ // 只写了「单」或「双」：按 1-17 周单/双周
     for(var w3=1;w3<=STAT_WEEKS;w3++){ weeks[w3]=(parity===1 ? w3%2===1 : w3%2===0); any=true; }
   }
-  return any ? weeks : null;
+  return any && weeks.slice(1,STAT_WEEKS+1).some(function(on){return on;}) ? weeks : null;
 }
 
 /* 全 1-17 周 */
@@ -1657,6 +1657,12 @@ async function saveEditor(){
   if(!name){ toast('请填写姓名'); $('pName').focus(); return; }
   var e=state.editing;
   if(!e) return;
+  for(var day=0;day<7;day++) for(var slot=0;slot<7;slot++){
+    if(e.draft.grid[day][slot].some(function(course){return /^待核对[:：]/.test(course.name);})){
+      toast('还有未识别清楚的格子。请对照原图修正或删除“待核对”课程后保存。',6000);
+      return;
+    }
+  }
   var uploadDepartmentId=e.draft.pendingDepartmentId||$('uploadDepartment').value;
   var firstSave=!e.draft.cloudId;
   e.draft.name=name;
@@ -1866,7 +1872,12 @@ function buildGrid(tokens, fileName, geometry){
       r.toks.sort(function(a,b){return a.cx-b.cx;});
       return r.toks.map(function(t){return t.text;}).join('');
     }).join('');
-    fieldsToCourses(flat).forEach(function(c){ grid[col][slot].push(c); courseCount++; });
+    var targetSlots=[slot];
+    if(geometry && rowBands.some(function(b){return b.maybeFifth && b.slots.indexOf(slot)>=0;}) &&
+       /[（(]?\s*3\s*[-~—]\s*5\s*节/.test(flat)) targetSlots.push(2);
+    fieldsToCourses(flat).forEach(function(c){
+      targetSlots.forEach(function(target){grid[col][target].push(c);courseCount++;});
+    });
   });
   if(courseCount===0) warn='已读取文件，但没有识别出课程内容，可能是图片清晰度不足或版式不同，请手动补录。';
   return {name:guessNameFromTokens(tokens,fileName), grid:grid, warn:warn, courseCount:courseCount};
@@ -1904,10 +1915,11 @@ function fieldsToCourses(flatRaw){
         var nm=t.split(/周/)[0].replace(/[\d\-—~～\s()（）单双第,，、节]+/g,'');
         name=nm||'未命名课程';
       }
-      var wk=parseWeeks(t)||allWeeks();
+      var wk=parseWeeks(t);
+      if(!wk) name='待核对：'+name;
       var lastC=courses[courses.length-1];
-      if(lastC && lastC.name===name){ for(var ww=1;ww<=STAT_WEEKS;ww++){ if(wk[ww]) lastC.weeks[ww]=true; } }
-      else courses.push({name:name, weeks:wk});
+      if(lastC && lastC.name===name && wk){ for(var ww=1;ww<=STAT_WEEKS;ww++){ if(wk[ww]) lastC.weeks[ww]=true; } }
+      else courses.push({name:name, weeks:wk||allWeeks()});
       lastName=name; pending=null; reuseName=null; afterWeek=true;
     }else if(isMetaTok(t)){
       /* 地点 / 班级 / 年级 / 空占位 */
@@ -1920,7 +1932,7 @@ function fieldsToCourses(flatRaw){
       pending=t; afterWeek=false;
     }
   });
-  if(pending && courses.length===0) courses.push({name:pending, weeks:allWeeks()});
+  if(pending && courses.length===0) courses.push({name:'待核对：'+pending, weeks:allWeeks()});
   return courses;
 }
 
@@ -1982,7 +1994,10 @@ async function parsePDF(file, onProgress){
       tokens=await ocrTokens(canvas, onProgress);
       geometry=tableGeometry(canvas);
     }
-    var res=geometry ? await ocrGridCells(raster,geometry,tokens,file.name,onProgress) : buildGrid(tokens,file.name);
+    var res=geometry
+      ? (tokens.engine==='paddle' ? guardUnreadCells(raster,geometry,buildGrid(tokens,file.name,geometry))
+        : await ocrGridCells(raster,geometry,tokens,file.name,onProgress))
+      : buildGrid(tokens,file.name);
     if(!name || /新人员/.test(name)) name=res.name;
     for(var d=0;d<7;d++) for(var s=0;s<7;s++) res.grid[d][s].forEach(function(c){merged[d][s].push(c);totalCourses++;});
   }
@@ -1992,6 +2007,36 @@ async function parsePDF(file, onProgress){
 }
 
 /* ---------- OCR ---------- */
+var _paddleOCRPromise=null;
+async function getPaddleOCR(onLog){
+  if(!_paddleOCRPromise){
+    onLog&&onLog('首次高精度识别需下载模型，请稍候…',5);
+    _paddleOCRPromise=(async function(){
+      await import('./vendor/paddle/paddle.js');
+      var root=new URL('./vendor/paddle/',location.href);
+      return window.PaddleOCR.create({
+        textDetectionModelName:'PP-OCRv6_tiny_det',
+        textDetectionModelAsset:{url:new URL('models/PP-OCRv6_tiny_det_onnx_infer.tar',root).href},
+        textRecognitionModelName:'PP-OCRv6_tiny_rec',
+        textRecognitionModelAsset:{url:new URL('models/PP-OCRv6_tiny_rec_onnx_infer.tar',root).href},
+        worker:true,
+        ortOptions:{backend:'wasm',wasmPaths:root.href,numThreads:1}
+      });
+    })().catch(function(err){_paddleOCRPromise=null;throw err;});
+  }
+  return _paddleOCRPromise;
+}
+function paddleTokens(items){
+  var tokens=[];
+  (items||[]).forEach(function(item){
+    if(!item.text || item.score<0.45 || !item.poly || !item.poly.length)return;
+    var xs=item.poly.map(function(p){return p[0];}),ys=item.poly.map(function(p){return p[1];});
+    var x0=Math.min.apply(null,xs),x1=Math.max.apply(null,xs),y0=Math.min.apply(null,ys),y1=Math.max.apply(null,ys);
+    tokens.push({text:item.text,x0:x0,x1:x1,y0:y0,y1:y1,cx:(x0+x1)/2,cy:(y0+y1)/2,h:y1-y0});
+  });
+  tokens.engine='paddle';
+  return tokens;
+}
 var _ocrWorker=null;
 async function getOCRWorker(onLog){
   if(_ocrWorker) return _ocrWorker;
@@ -2020,11 +2065,50 @@ function ocrTokensFromData(data){
   return tokens;
 }
 async function ocrTokens(source, onProgress){
+  try{
+    var paddle=await getPaddleOCR(onProgress);
+    onProgress&&onProgress('正在高精度识别中文和周次…',45);
+    var results=await paddle.predict(source);
+    var highQuality=paddleTokens(results[0]&&results[0].items);
+    if(highQuality.length>=8){onProgress&&onProgress('正在按表格归位课程…',88);return highQuality;}
+  }catch(err){
+    onProgress&&onProgress('高精度识别暂不可用，改用备用识别器…',15);
+  }
   var worker=await getOCRWorker(onProgress);
   onProgress&&onProgress('正在识别文字…', 45);
   var ret=await worker.recognize(source);
   onProgress&&onProgress('正在归位课程…', 88);
   return ocrTokensFromData(ret.data);
+}
+function guardUnreadCells(source,geometry,result){
+  if(!source || !geometry)return result;
+  var canvas=document.createElement('canvas');
+  canvas.width=source.naturalWidth||source.width;canvas.height=source.naturalHeight||source.height;
+  var ctx=canvas.getContext('2d',{willReadFrequently:true});
+  ctx.drawImage(source,0,0);
+  var pixels=ctx.getImageData(0,0,canvas.width,canvas.height).data,unread=0;
+  geometry.rowBands.forEach(function(row){
+    geometry.colBands.forEach(function(col){
+      var slots=row.slots||[row.slot];
+      if(slots.some(function(slot){return result.grid[col.col][slot].length;}))return;
+      var x0=Math.max(0,Math.ceil(col.l+4)),x1=Math.min(canvas.width,Math.floor(col.r-4));
+      var y0=Math.max(0,Math.ceil(row.l+4)),y1=Math.min(canvas.height,Math.floor(row.r-4));
+      if(x1-x0<30||y1-y0<25)return;
+      var dark=0,total=0;
+      for(var y=y0;y<y1;y+=2)for(var x=x0;x<x1;x+=2){
+        var k=(y*canvas.width+x)*4;total++;
+        if(pixels[k]+pixels[k+1]+pixels[k+2]<540)dark++;
+      }
+      if(dark/total<=0.008)return;
+      slots.forEach(function(slot){
+        result.grid[col.col][slot].push({name:'待核对：检测到文字但未识别课程',weeks:allWeeks()});
+        result.courseCount++;
+      });
+      unread++;
+    });
+  });
+  if(unread)result.warn='有 '+unread+' 个格子检测到文字但未读出课程，已标“待核对”；请对照原图修正后保存。';
+  return result;
 }
 function cellTextQuality(data){
   var text=(data.text||'').replace(/\s+/g,'');
@@ -2094,8 +2178,12 @@ async function parseImage(file, onProgress){
     await new Promise(function(res,rej){ img.onload=res; img.onerror=rej; img.src=url; });
     var tokens=await ocrTokens(img, onProgress);
     var geometry=tableGeometry(img);
-    var res=geometry ? await ocrGridCells(img,geometry,tokens,file.name,onProgress) : buildGrid(tokens,file.name);
-    var warn = res.courseCount ? '已逐格放大识别。'+(res.warn||'请对照原图核对课程名称、节次和周次后保存。') : res.warn;
+    var res=geometry
+      ? (tokens.engine==='paddle' ? guardUnreadCells(img,geometry,buildGrid(tokens,file.name,geometry))
+        : await ocrGridCells(img,geometry,tokens,file.name,onProgress))
+      : buildGrid(tokens,file.name);
+    var warn = res.courseCount ? (tokens.engine==='paddle'?'已使用高精度中文识别。':'已逐格放大识别。')
+      +(res.warn||'请对照原图核对课程名称、节次和周次后保存。') : res.warn;
     return {id:uid(), name:res.name, cls:'', grid:res.grid, source:file.name, needVerify:true, warn:warn, courseCount:res.courseCount||0};
   }finally{ URL.revokeObjectURL(url); }
 }
