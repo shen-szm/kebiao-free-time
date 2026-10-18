@@ -2031,7 +2031,7 @@ function cellTextQuality(data){
   var hasWeek=/\d{1,2}\s*[-~—]\s*\d{1,2}\s*周|第?\d{1,2}\s*周|单周|双周/.test(text);
   var han=(text.match(/[一-龥]/g)||[]).length;
   // 周次和中文课程名比单纯的 OCR 置信度更重要；置信度只用于两个有效结果之间的选择。
-  return (hasWeek?100:0)+Math.min(han,20)+(Number(data.confidence)||0)/20;
+  return (hasWeek?100:0)+Math.min(han,12)/4+(Number(data.confidence)||0)/5;
 }
 async function ocrGridCells(source, geometry, tokens, fileName, onProgress){
   var worker=await getOCRWorker(onProgress);
@@ -2062,7 +2062,7 @@ async function ocrGridCells(source, geometry, tokens, fileName, onProgress){
     var flat=(result.data.text||'').replace(/\s+/g,'');
     // 对没有清楚读出周次、或置信度较低的格子，再用保留细笔画的图像重读。
     // 表格位置仍由网格线决定，不让 OCR 的坐标误差把周五课程挪到别的列。
-    if(cellTextQuality(result.data)<112 || (Number(result.data.confidence)||0)<70){
+    if(cellTextQuality(result.data)<117 || (Number(result.data.confidence)||0)<70){
       var alternate=document.createElement('canvas');
       alternate.width=cell.width*3;alternate.height=cell.height*3;
       var altCtx=alternate.getContext('2d');
