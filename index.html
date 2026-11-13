@@ -563,42 +563,38 @@ function currentTermWeek(){
 
 /* ---------- 周次解析 ----------
  * 输入周次描述文本，输出长度 MAX_WEEK+1 的布尔数组（下标=周次）。
- * 无法解析时返回 null；调用方可按「全周」兜底或交给人工核对。 */
+ * 无法解析、周次矛盾或超出学期时返回 null，交给人工核对。 */
 function parseWeeks(raw){
   if(!raw) return null;
-  var t = String(raw).replace(/（/g,'(').replace(/）/g,')').replace(/，/g,',')
-                     .replace(/[~～]/g,'-').replace(/–/g,'-').replace(/—/g,'-');
-  // 去掉节次标签，如 (3-4节)、(8-9节)，避免其数字被当成周次
-  t = t.replace(/\(\s*\d{1,2}\s*-\s*\d{1,2}\s*节\s*\)/g,' ').replace(/\d{1,2}\s*-\s*\d{1,2}\s*节/g,' ');
-  var parity = 0; // 1 单(奇)  2 双(偶)
-  if(/双/.test(t)) parity = 2;
-  else if(/单/.test(t)) parity = 1;
-  var set = {}, covered = [], m;
-  var rangeRe = /(\d{1,2})\s*-\s*(\d{1,2})\s*周?/g;
-  while((m = rangeRe.exec(t))){
-    var a = +m[1], b = +m[2];
-    if(a>b){var tmp=a;a=b;b=tmp;}
-    for(var w=a;w<=b;w++) set[w]=1;
-    covered.push([m.index, m.index+m[0].length]);
+  var t=String(raw).replace(/[０-９]/g,function(n){return String(n.charCodeAt(0)-65296);})
+    .replace(/（/g,'(').replace(/）/g,')').replace(/[~～–—－至到]/g,'-')
+    .replace(/\s+/g,'').replace(/第/g,'');
+  // 节次数字不能参与周次计算；单双周只约束它紧邻的那一段。
+  t=t.replace(/\(?\d+(?:-\d+)?节\)?/g,'').replace(/^(?:上课)?周次[:：]?/,'')
+    .replace(/[，、；;及和]/g,',').replace(/([单双])周/g,'$1');
+  if(/^[单双]\d/.test(t))t=t.slice(1)+'('+t[0]+')';
+  var weeks=Array(MAX_WEEK+1).fill(false);
+  if(/^(?:全周|每周|全学期)$/.test(t)){
+    for(var w=1;w<=STAT_WEEKS;w++)weeks[w]=true;
+    return weeks;
   }
-  var singleRe = /第?\s*(\d{1,2})\s*周/g;
-  while((m = singleRe.exec(t))){
-    var inside=false;
-    for(var i=0;i<covered.length;i++){ if(m.index>=covered[i][0] && m.index<covered[i][1]){inside=true;break;} }
-    if(!inside) set[+m[1]] = 1;
+  if(/^\(?[单双]\)?$/.test(t)){
+    for(var p=1;p<=STAT_WEEKS;p++)weeks[p]=(t.indexOf('单')>=0?p%2===1:p%2===0);
+    return weeks;
   }
-  var weeks = [], any=false;
-  for(var w2=1;w2<=MAX_WEEK;w2++){
-    var on = !!set[w2];
-    if(on && parity===1 && w2%2===0) on=false;
-    if(on && parity===2 && w2%2===1) on=false;
-    if(on) any=true;
-    weeks[w2]=on;
-  }
-  if(!any && parity){ // 只写了「单」或「双」：按 1-17 周单/双周
-    for(var w3=1;w3<=STAT_WEEKS;w3++){ weeks[w3]=(parity===1 ? w3%2===1 : w3%2===0); any=true; }
-  }
-  return any && weeks.slice(1,STAT_WEEKS+1).some(function(on){return on;}) ? weeks : null;
+  var invalid=false,matched=false;
+  var rest=t.replace(/(\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*)周?(?:\(([单双])\)|([单双]))?/g,function(_,list,bracketParity,bareParity){
+    matched=true;
+    var parity=bracketParity||bareParity;
+    list.split(',').forEach(function(segment){
+      var ends=segment.split('-'),a=Number(ends[0]),b=Number(ends[1]||ends[0]);
+      if(a<1||b>MAX_WEEK||a>b){invalid=true;return;}
+      for(var n=a;n<=b;n++)if(!parity||(parity==='单'?n%2===1:n%2===0))weeks[n]=true;
+    });
+    return '';
+  });
+  if(invalid||!matched||rest.replace(/,/g,'')||!weeks.slice(1,STAT_WEEKS+1).some(function(on){return on;}))return null;
+  return weeks;
 }
 
 /* 全 1-17 周 */
@@ -1796,17 +1792,26 @@ function buildGrid(tokens, fileName, geometry){
     return /星期/.test(x) || /^周[一二三四五六日天]$/.test(x);
   });
   var colCenters=[];
-  if(colToks.length){
-    var xs=colToks.map(function(t){return t.cx;}).sort(function(a,b){return a-b;});
-    var gaps=[]; for(var i=1;i<xs.length;i++) gaps.push(xs[i]-xs[i-1]);
-    var colW=median(gaps.filter(function(g){return g>0;})) || 40;
-    colCenters=cluster1D(xs, colW*0.4);
-    while(colCenters.length>7){
-      var mi=1,md=colCenters[1]-colCenters[0];
-      for(var k=2;k<colCenters.length;k++) if(colCenters[k]-colCenters[k-1]<md){md=colCenters[k]-colCenters[k-1];mi=k;}
-      colCenters.splice(mi-1,2,(colCenters[mi]+colCenters[mi-1])/2);
+  var dayLabels={};
+  colToks.forEach(function(t){
+    var match=t.text.replace(/\s+/g,'').match(/^(?:星期|周)([一二三四五六日天1-7])/);
+    if(!match)return;
+    var day=/[1-7]/.test(match[1])?Number(match[1])-1:'一二三四五六日'.indexOf(match[1]==='天'?'日':match[1]);
+    if(!dayLabels[day])dayLabels[day]=[];
+    dayLabels[day].push(t.cx);
+  });
+  var knownDays=Object.keys(dayLabels).map(Number).sort(function(a,b){return a-b;});
+  if(!geometry && knownDays.length>=3){
+    var pitches=[];
+    for(var di=1;di<knownDays.length;di++){
+      var left=knownDays[di-1],right=knownDays[di];
+      pitches.push((median(dayLabels[right])-median(dayLabels[left]))/(right-left));
     }
-  }
+    var pitch=median(pitches),origin=median(knownDays.map(function(day){return median(dayLabels[day])-day*pitch;}));
+    if(pitch>0 && knownDays.every(function(day){return Math.abs(median(dayLabels[day])-(origin+day*pitch))<pitch*0.25;})){
+      colCenters=Array.from({length:7},function(_,day){return origin+day*pitch;});
+    }else colCenters=[];
+  }else if(!geometry)colCenters=[];
   var firstLeft = geometry ? geometry.colBands[0].l : (colCenters.length ? colCenters[0]-(colCenters[1]-colCenters[0])*0.55 : Infinity);
   var slotRows={0:[],1:[],2:[],3:[],4:[],5:[],6:[]};
   tokens.forEach(function(t){
@@ -1850,7 +1855,6 @@ function buildGrid(tokens, fileName, geometry){
     if(!cb||!rb) return;
     var slots=rb.slots||[rb.slot];
     slots.forEach(function(slot){
-      if(!geometry && slot===2)return; // 文字坐标模式中，这一窄带常混入相邻格的碎片
       var key=cb.col+'_'+slot;
       if(!cellTok[key]) cellTok[key]=[];
       cellTok[key].push(t);
@@ -1875,7 +1879,11 @@ function buildGrid(tokens, fileName, geometry){
     var targetSlots=[slot];
     if(geometry && rowBands.some(function(b){return b.maybeFifth && b.slots.indexOf(slot)>=0;}) &&
        /[（(]?\s*3\s*[-~—]\s*5\s*节/.test(flat)) targetSlots.push(2);
-    fieldsToCourses(flat).forEach(function(c){
+    var parsedCourses=fieldsToCourses(flat);
+    if(ts.some(function(t){return typeof t.score==='number' && t.score<0.85 && /周|[单双]|节/.test(t.text);})){
+      parsedCourses.push({name:'待核对：周次或节次识别置信度较低',weeks:allWeeks()});
+    }
+    parsedCourses.forEach(function(c){
       targetSlots.forEach(function(target){grid[col][target].push(c);courseCount++;});
     });
   });
@@ -1886,15 +1894,16 @@ function buildGrid(tokens, fileName, geometry){
 /* 格内无缝文本 → 按「/」切字段 → 课程列表 */
 function fieldsToCourses(flatRaw){
   /* 物理换行无缝拼接后，班级碎片(4位年级)后可能直接黏着下一门课名；"无"后可能直接黏着重复周次条 */
-  var flat=flatRaw
+  var flat=String(flatRaw||'').replace(/[０-９]/g,function(n){return String(n.charCodeAt(0)-65296);})
     .replace(/(\d{4})([一-龥]{2,})/g,'$1/$2')
+    .replace(/(周(?:[（(][单双](?:周)?[）)])?)(?=(?:[一二三四五六七八九十\d]+教|[A-Za-z]?\d{3,}))/g,'$1/')
     .replace(/无(?=\s*第?\s*\d+\s*周)/g,'无/');
   var toks=flat.split(/[/／]+/).map(function(x){return x.trim();}).filter(function(x){return x;});
   var courses=[], pending=null, afterWeek=false, lastName=null, reuseName=null;
   function isWeekTok(t){ return /周/.test(t) && (/\d/.test(t)||/[单双]/.test(t)); }
   function isMetaTok(t){
     if(t==='无') return true;
-    if(/(教\s*[A-Za-z0-9]|楼|馆|场|苑|室|堂|北区|南区|东区|西区|校区)/.test(t) && t.length<=18) return true;  // 地点（不含"主"，避免误杀"马克思主义基本原理"等课名）
+    if(t.length<=24 && (/(教|楼|馆|室|区)/.test(t)&&/\d/.test(t) || /(?:广场|体育馆|田径场|体育场|操场)$/.test(t)))return true;
     if(/\d{4}/.test(t) && !/周/.test(t) && t.length<=20) return true;      // 班级 / 年级
     if(/^[A-Za-z0-9][A-Za-z0-9\-()（）]*$/.test(t)) return true;           // 房号 / 数字编号
     return false;
@@ -1913,7 +1922,7 @@ function fieldsToCourses(flatRaw){
       var name=pending||reuseName;
       if(!name){
         var nm=t.split(/周/)[0].replace(/[\d\-—~～\s()（）单双第,，、节]+/g,'');
-        name=nm||'未命名课程';
+        name=nm||'待核对：未能识别课程名';
       }
       var wk=parseWeeks(t);
       if(!wk) name='待核对：'+name;
@@ -1974,36 +1983,48 @@ async function parsePDF(file, onProgress){
   onProgress&&onProgress('正在解析 PDF 文本…', 20);
   var buf=await file.arrayBuffer();
   var pdf=await pdfjsLib.getDocument({data:buf}).promise;
-  var merged=emptyGrid(), name='', totalCourses=0, usedOCR=false;
+  var merged=emptyGrid(), name='', reliableName='', totalCourses=0, usedOCR=false,pageWarnings=[];
+  try{
   for(var pi=1;pi<=pdf.numPages;pi++){
     var page=await pdf.getPage(pi);
     var tc=await page.getTextContent();
-    var geometry=null;
-    var raster=null;
+    var original=page.getViewport({scale:1});
+    var vp=page.getViewport({scale:Math.min(2.2,2400/Math.max(original.width,original.height))});
+    var raster=document.createElement('canvas');
+    raster.width=Math.ceil(vp.width);raster.height=Math.ceil(vp.height);
+    onProgress&&onProgress('正在检查 PDF 第 '+pi+'/'+pdf.numPages+' 页的课表布局…',25);
+    await page.render({canvasContext:raster.getContext('2d'),viewport:vp}).promise;
+    var geometry=tableGeometry(raster);
     var tokens=tc.items.filter(function(it){return it.str&&it.str.trim();}).map(function(it){
       var x=it.transform[4], y=it.transform[5], h=it.height||9, w=it.width||5;
-      return {text:it.str, x0:x, y0:y, x1:x+w, y1:y+h, cx:x+w/2, cy:y+h/2, h:h};
+      var rect=vp.convertToViewportRectangle([x,y,x+w,y+h]);
+      var x0=Math.min(rect[0],rect[2]),x1=Math.max(rect[0],rect[2]),y0=Math.min(rect[1],rect[3]),y1=Math.max(rect[1],rect[3]);
+      return {text:it.str,x0:x0,y0:y0,x1:x1,y1:y1,cx:(x0+x1)/2,cy:(y0+y1)/2,h:y1-y0};
     });
-    if(tokens.length<20){
+    var res=guardUnreadCells(raster,geometry,buildGrid(tokens,file.name,geometry));
+    var incomplete=res.grid.some(function(day){return day.some(function(cell){return cell.some(function(c){return /^待核对[:：]/.test(c.name);});});});
+    if(tokens.length<20 || !geometry || !res.courseCount || incomplete){
       usedOCR=true;
-      onProgress&&onProgress('PDF 无文本层，转图片 OCR…', 30);
-      var vp=page.getViewport({scale:2.2}), canvas=document.createElement('canvas');
-      canvas.width=vp.width; canvas.height=vp.height;
-      await page.render({canvasContext:canvas.getContext('2d'), viewport:vp}).promise;
-      raster=canvas;
-      tokens=await ocrTokens(canvas, onProgress);
-      geometry=tableGeometry(canvas);
+      onProgress&&onProgress('第 '+pi+' 页文字层不完整，正在识别图像中的课程…',30);
+      tokens=await ocrTokens(raster,onProgress);
+      res=geometry
+        ? (tokens.engine==='paddle' ? guardUnreadCells(raster,geometry,buildGrid(tokens,file.name,geometry))
+          : await ocrGridCells(raster,geometry,tokens,file.name,onProgress))
+        : buildGrid(tokens,file.name);
     }
-    var res=geometry
-      ? (tokens.engine==='paddle' ? guardUnreadCells(raster,geometry,buildGrid(tokens,file.name,geometry))
-        : await ocrGridCells(raster,geometry,tokens,file.name,onProgress))
-      : buildGrid(tokens,file.name);
+    if(/的\s*课\s*表/.test(tokens.map(function(t){return t.text;}).join('')) && res.courseCount){
+      if(reliableName && reliableName!==res.name)throw new Error('PDF 中检测到多位人员（'+reliableName+'、'+res.name+'），请将各人的课表分别上传，避免合并错误。');
+      reliableName=res.name;
+    }
     if(!name || /新人员/.test(name)) name=res.name;
+    if(res.warn)pageWarnings.push('第'+pi+'页：'+res.warn);
     for(var d=0;d<7;d++) for(var s=0;s<7;s++) res.grid[d][s].forEach(function(c){merged[d][s].push(c);totalCourses++;});
   }
+  }finally{await pdf.destroy();}
   var warn = totalCourses===0 ? '该 PDF 未能识别出课程'+(usedOCR?'（已尝试 OCR）':'')+'，请手动补录。'
-             : (usedOCR ? '该 PDF 是扫描件，已通过 OCR 识别，请仔细核对课程与周次。' : 'PDF 文本识别结果，请抽查课程与周次是否正确。');
-  return {id:uid(), name:name, cls:'', grid:merged, source:file.name, needVerify:true, warn:warn, courseCount:totalCourses};
+             : (usedOCR ? 'PDF 中的图像或不完整文字层已通过 OCR 复核，请核对课程与周次。' : 'PDF 文本识别结果，请抽查课程与周次是否正确。');
+  if(pageWarnings.length)warn+=' '+pageWarnings.join(' ');
+  return {id:uid(), name:reliableName||name, cls:'', grid:merged, source:file.name, needVerify:true, warn:warn, courseCount:totalCourses};
 }
 
 /* ---------- OCR ---------- */
@@ -2029,10 +2050,10 @@ async function getPaddleOCR(onLog){
 function paddleTokens(items){
   var tokens=[];
   (items||[]).forEach(function(item){
-    if(!item.text || item.score<0.45 || !item.poly || !item.poly.length)return;
+    if(!item.text || item.score<0.2 || !item.poly || !item.poly.length)return;
     var xs=item.poly.map(function(p){return p[0];}),ys=item.poly.map(function(p){return p[1];});
     var x0=Math.min.apply(null,xs),x1=Math.max.apply(null,xs),y0=Math.min.apply(null,ys),y1=Math.max.apply(null,ys);
-    tokens.push({text:item.text,x0:x0,x1:x1,y0:y0,y1:y1,cx:(x0+x1)/2,cy:(y0+y1)/2,h:y1-y0});
+    tokens.push({text:item.text,score:item.score,x0:x0,x1:x1,y0:y0,y1:y1,cx:(x0+x1)/2,cy:(y0+y1)/2,h:y1-y0});
   });
   tokens.engine='paddle';
   return tokens;
