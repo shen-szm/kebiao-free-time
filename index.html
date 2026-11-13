@@ -2133,7 +2133,7 @@ function guardUnreadCells(source,geometry,result){
 }
 function cellTextQuality(data){
   var text=(data.text||'').replace(/\s+/g,'');
-  var hasWeek=/\d{1,2}\s*[-~—]\s*\d{1,2}\s*周|第?\d{1,2}\s*周|单周|双周/.test(text);
+  var hasWeek=fieldsToCourses(text).some(function(course){return !/^待核对[:：]/.test(course.name);});
   var han=(text.match(/[一-龥]/g)||[]).length;
   // 周次和中文课程名比单纯的 OCR 置信度更重要；置信度只用于两个有效结果之间的选择。
   return (hasWeek?100:0)+Math.min(han,12)/4+(Number(data.confidence)||0)/5;
@@ -2178,11 +2178,10 @@ async function ocrGridCells(source, geometry, tokens, fileName, onProgress){
       if(cellTextQuality(retry.data)>cellTextQuality(result.data)) flat=(retry.data.text||'').replace(/\s+/g,'');
     }
     var courses=fieldsToCourses(flat);
-    var hasWeeks=/\d{1,2}\s*[-~—]\s*\d{1,2}\s*周|第?\d{1,2}\s*周|单周|双周/.test(flat);
-    if(!courses.length||!hasWeeks){
+    if(!courses.length){
       courses=[{name:'待核对：课程或周次识别不清',weeks:allWeeks()}];
-      uncertain++;
     }
+    if(courses.some(function(course){return /^待核对[:：]/.test(course.name);}))uncertain++;
     var slots=cell.row.slots.slice();
     if(cell.row.maybeFifth&&/[（(]?3\s*[-~—]\s*5\s*节/.test(flat))slots.push(2);
     slots.forEach(function(slot){

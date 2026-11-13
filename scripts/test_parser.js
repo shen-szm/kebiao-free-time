@@ -23,6 +23,8 @@ vm.runInContext(`
 assert.ok(context.cellTextQuality({text:'马克思主义基本原理/1-15周(单)',confidence:65})
   > context.cellTextQuality({text:'马克思主又基木原理',confidence:95}),
   'a legible week range must outrank high-confidence text with no week information');
+assert.ok(context.cellTextQuality({text:'高等数学/第１至第４周',confidence:65})>100,
+  'the fallback OCR scorer must recognize the same normalized weeks as the course parser');
 
 function token(text, x, y, width = 70) {
   return {text, x0:x, y0:y, x1:x+width, y1:y+12, cx:x+width/2, cy:y+6, h:12};
