@@ -1744,7 +1744,7 @@ function tableGeometry(source){
   var ctx=canvas.getContext('2d',{willReadFrequently:true});
   ctx.drawImage(source,0,0);
   var px=ctx.getImageData(0,0,w,h).data;
-  function dark(x,y){var k=(y*w+x)*4;return px[k]+px[k+1]+px[k+2]<540;}
+  function dark(x,y){var k=(y*w+x)*4;return px[k]+px[k+1]+px[k+2]<660;}
   function linePositions(vertical){
     var length=vertical?w:h, across=vertical?h:w;
     var lo=Math.round(across*(vertical?0.07:0.03));
@@ -1880,8 +1880,8 @@ function buildGrid(tokens, fileName, geometry){
     if(geometry && rowBands.some(function(b){return b.maybeFifth && b.slots.indexOf(slot)>=0;}) &&
        /[（(]?\s*3\s*[-~—]\s*5\s*节/.test(flat)) targetSlots.push(2);
     var parsedCourses=fieldsToCourses(flat);
-    if(ts.some(function(t){return typeof t.score==='number' && t.score<0.85 && /周|[单双]|节/.test(t.text);})){
-      parsedCourses.push({name:'待核对：周次或节次识别置信度较低',weeks:allWeeks()});
+    if(ts.some(function(t){return t.reviewRequired || typeof t.score==='number' && t.score<0.85 && /周|[单双]|节/.test(t.text);})){
+      parsedCourses.push({name:'待核对：课程、周次或节次需要复核',weeks:allWeeks()});
     }
     parsedCourses.forEach(function(c){
       targetSlots.forEach(function(target){grid[col][target].push(c);courseCount++;});
@@ -2091,7 +2091,15 @@ async function ocrTokens(source, onProgress){
     onProgress&&onProgress('正在高精度识别中文和周次…',45);
     var results=await paddle.predict(source);
     var highQuality=paddleTokens(results[0]&&results[0].items);
-    if(highQuality.length>=8){onProgress&&onProgress('正在按表格归位课程…',88);return highQuality;}
+    if(highQuality.length>=8){
+      var geometry=tableGeometry(source);
+      if(geometry){
+        try{highQuality=await enhancePaddleCells(source,geometry,highQuality,paddle,onProgress);}
+        catch(err){onProgress&&onProgress('局部增强未完成，正在保留整页识别结果…',85);}
+      }
+      onProgress&&onProgress('正在按表格归位课程…',88);
+      return highQuality;
+    }
   }catch(err){
     onProgress&&onProgress('高精度识别暂不可用，改用备用识别器…',15);
   }
@@ -2100,6 +2108,89 @@ async function ocrTokens(source, onProgress){
   var ret=await worker.recognize(source);
   onProgress&&onProgress('正在归位课程…', 88);
   return ocrTokensFromData(ret.data);
+}
+async function enhancePaddleCells(source,geometry,tokens,paddle,onProgress){
+  var canvas=document.createElement('canvas');
+  canvas.width=source.naturalWidth||source.width;canvas.height=source.naturalHeight||source.height;
+  var ctx=canvas.getContext('2d',{willReadFrequently:true});ctx.drawImage(source,0,0);
+  var pixels=ctx.getImageData(0,0,canvas.width,canvas.height).data,candidates=[],replacements=[];
+  var detectorScale=Math.min(1,960/Math.max(canvas.width,canvas.height));
+  geometry.rowBands.forEach(function(row){geometry.colBands.forEach(function(col){
+    // 低清图的首字常贴着表格线；裁图保留边缘笔画，像素占用统计另行避开边框。
+    var x=Math.max(0,Math.floor(col.l-2)),y=Math.max(0,Math.floor(row.l-1));
+    var width=Math.min(canvas.width,Math.ceil(col.r+1))-x,height=Math.min(canvas.height,Math.ceil(row.r+1))-y;
+    if(width<30||height<25)return;
+    var inside=tokens.filter(function(t){return t.cx>=col.l&&t.cx<col.r&&t.cy>=row.l&&t.cy<row.r;});
+    var dark=0,faint=0,total=0;
+    for(var py=y+4;py<y+height-4;py+=2)for(var px=x+4;px<x+width-4;px+=2){
+      var k=(py*canvas.width+px)*4,ink=pixels[k]+pixels[k+1]+pixels[k+2];
+      total++;if(ink<540)dark++;if(ink<660)faint++;
+    }
+    if(!inside.length&&dark/total<0.008&&faint/total<0.03)return;
+    var effectiveHeight=(median(inside.map(function(t){return t.h;}))||0)*detectorScale;
+    var parsed=buildGrid(inside,'',geometry);
+    var courses=parsed.grid[col.col][row.slots[0]];
+    var courseLines=inside.filter(function(t){return /周|[单双]|节/.test(t.text)||courses.some(function(c){return t.text.indexOf(c.name)>=0;});});
+    var confidence=courseLines.length?Math.min.apply(null,courseLines.map(function(t){return t.score;})):0;
+    var smallShortName=canvas.width<1000&&courses.some(function(c){return c.name.length<=3;});
+    if(courses.length&&!courses.some(function(c){return /^待核对[:：]/.test(c.name);})&&confidence>=0.97&&effectiveHeight>=14&&!smallShortName)return;
+    var placeholder=!courses.length&&(dark/total>=0.008||faint/total>=0.03)
+      ? {text:'模糊文字未能识别',score:0.2,x0:x,x1:x+width,y0:y,y1:y+12,cx:x+width/2,cy:y+6,h:12}:null;
+    candidates.push({row:row,col:col,x:x,y:y,width:width,height:height,tokens:inside,placeholder:placeholder});
+  });});
+  for(var i=0;i<candidates.length;i++){
+    var cell=candidates[i],pad=12;
+    var scale=Math.min(3,Math.max(2,Math.ceil(32/(median(cell.tokens.map(function(t){return t.h;}))||12))));
+    var crop=document.createElement('canvas');crop.width=Math.ceil(cell.width*scale)+pad*2;crop.height=Math.ceil(cell.height*scale)+pad*2;
+    var cropCtx=crop.getContext('2d');cropCtx.fillStyle='#fff';cropCtx.fillRect(0,0,crop.width,crop.height);
+    cropCtx.imageSmoothingQuality='high';cropCtx.filter='grayscale(1) contrast(1.15)';
+    cropCtx.drawImage(source,cell.x,cell.y,cell.width,cell.height,pad,pad,cell.width*scale,cell.height*scale);
+    onProgress&&onProgress('正在增强重读模糊格子 '+(i+1)+'/'+candidates.length+'…',50+Math.round(35*(i+1)/candidates.length));
+    try{
+      var restoreTokens=function(items){return paddleTokens(items).map(function(t){
+        return Object.assign({},t,{x0:cell.x+(t.x0-pad)/scale,x1:cell.x+(t.x1-pad)/scale,
+          y0:cell.y+(t.y0-pad)/scale,y1:cell.y+(t.y1-pad)/scale,
+          cx:cell.x+(t.cx-pad)/scale,cy:cell.y+(t.cy-pad)/scale,h:t.h/scale});
+      }).filter(function(t){return t.cx>=cell.col.l&&t.cx<cell.col.r&&t.cy>=cell.row.l&&t.cy<cell.row.r;});};
+      var prediction=await paddle.predict(crop,{textRecScoreThresh:0.2});
+      var reread=restoreTokens(prediction[0]&&prediction[0].items);
+      var evaluateReading=function(list){
+        var parsed=buildGrid(list,'',geometry),slots=cell.row.slots.concat(cell.row.maybeFifth?[2]:[]),courses=[],signature=[],byName={};
+        slots.forEach(function(slot){parsed.grid[cell.col.col][slot].forEach(function(c){
+          var weeks=c.weeks.map(function(on,w){return on?w:'';}).filter(Boolean).join(',');
+          courses.push(c);signature.push(slot+':'+weeks);byName[slot+':'+c.name]=weeks;
+        });});
+        var important=list.filter(function(t){return /周|[单双]|节/.test(t.text)||courses.some(function(c){return t.text.indexOf(c.name)>=0;});});
+        if(!important.length)important=list;
+        return {valid:courses.length>0&&!courses.some(function(c){return /^待核对[:：]/.test(c.name);}),
+          count:courses.filter(function(c){return !/^待核对[:：]/.test(c.name);}).length,
+          weeks:signature.sort().join('|'),byName:byName,names:Object.keys(byName).sort().join('|'),
+          confidence:important.reduce(function(sum,t){return sum+t.score;},0)/(important.length||1)};
+      };
+      var old=evaluateReading(cell.tokens),fresh=evaluateReading(reread),agreed=false;
+      var nameConflict=old.valid&&fresh.valid&&old.names!==fresh.names&&fresh.confidence>=0.9;
+      if(nameConflict){
+        cropCtx.filter='none';cropCtx.fillStyle='#fff';cropCtx.fillRect(0,0,crop.width,crop.height);
+        cropCtx.drawImage(source,cell.x,cell.y,cell.width,cell.height,pad,pad,cell.width*scale,cell.height*scale);
+        var alternate=await paddle.predict(crop,{textRecScoreThresh:0.2});
+        var checked=evaluateReading(restoreTokens(alternate[0]&&alternate[0].items));
+        agreed=checked.valid&&checked.confidence>=0.9&&checked.names===fresh.names&&checked.weeks===fresh.weeks;
+      }
+      var conflict=old.valid&&fresh.valid&&fresh.confidence>=0.9&&(old.weeks!==fresh.weeks||
+        Object.keys(old.byName).some(function(key){return Object.prototype.hasOwnProperty.call(fresh.byName,key)&&old.byName[key]!==fresh.byName[key];})||nameConflict&&!agreed);
+      var accept=fresh.valid&&fresh.count>=old.count&&fresh.confidence>=0.9&&(!old.valid||fresh.confidence>old.confidence+0.015||agreed);
+      var chosen=accept?reread:cell.tokens;
+      if(conflict&&chosen.length)chosen=chosen.map(function(t,j){return j? t:Object.assign({},t,{reviewRequired:true});});
+      if(accept||conflict)replacements.push({cell:cell,tokens:chosen});
+      else if(cell.placeholder)replacements.push({cell:cell,tokens:cell.tokens.concat([cell.placeholder])});
+    }catch(err){
+      if(cell.placeholder)replacements.push({cell:cell,tokens:cell.tokens.concat([cell.placeholder])});
+    }
+  }
+  var result=tokens.filter(function(t){return !replacements.some(function(r){return r.cell.tokens.indexOf(t)>=0;});});
+  replacements.forEach(function(r){result=result.concat(r.tokens);});
+  result.engine='paddle';result.enhancementAttempts=candidates.length;
+  return result;
 }
 function guardUnreadCells(source,geometry,result){
   if(!source || !geometry)return result;
@@ -2143,8 +2234,9 @@ async function ocrGridCells(source, geometry, tokens, fileName, onProgress){
   var grid=emptyGrid(), occupied=[], uncertain=0, courseCount=0;
   geometry.rowBands.forEach(function(row){
     geometry.colBands.forEach(function(col){
-      var x=Math.ceil(col.l+2),y=Math.ceil(row.l+2);
-      var width=Math.floor(col.r-col.l-4),height=Math.floor(row.r-row.l-4);
+      var x=Math.max(0,Math.floor(col.l-2)),y=Math.max(0,Math.floor(row.l-1));
+      var width=Math.min(source.naturalWidth||source.width,Math.ceil(col.r+1))-x;
+      var height=Math.min(source.naturalHeight||source.height,Math.ceil(row.r+1))-y;
       if(width<30||height<25)return;
       var sample=document.createElement('canvas');
       sample.width=width;sample.height=height;
@@ -2203,6 +2295,7 @@ async function parseImage(file, onProgress){
         : await ocrGridCells(img,geometry,tokens,file.name,onProgress))
       : buildGrid(tokens,file.name);
     var warn = res.courseCount ? (tokens.engine==='paddle'?'已使用高精度中文识别。':'已逐格放大识别。')
+      +(tokens.enhancementAttempts?'已对 '+tokens.enhancementAttempts+' 个模糊或小字格子进行增强复核。':'')
       +(res.warn||'请对照原图核对课程名称、节次和周次后保存。') : res.warn;
     return {id:uid(), name:res.name, cls:'', grid:res.grid, source:file.name, needVerify:true, warn:warn, courseCount:res.courseCount||0};
   }finally{ URL.revokeObjectURL(url); }

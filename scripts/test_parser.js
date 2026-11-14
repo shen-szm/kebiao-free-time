@@ -17,6 +17,8 @@ vm.runInContext(`
   ${section('function allWeeks(){', '/* 单周 / 双周')}
   ${section('var SLOT_BY_PERIOD =', '/* ---------- PDF ---------- */')}
   ${section('function paddleTokens(items){', 'var _ocrWorker=')}
+  ${section('async function enhancePaddleCells(', 'function guardUnreadCells(')}
+  ${section('function guardUnreadCells(', 'function cellTextQuality(')}
   ${section('function cellTextQuality(data){', 'async function ocrGridCells(')}
 `, context);
 
@@ -128,3 +130,49 @@ assert.ok(geometry.colBands[0].l>276 && geometry.colBands[0].l<285);
 assert.equal(geometry.colBands[4].col,4);
 assert.deepEqual(Array.from(geometry.rowBands[3].slots),[4]);
 console.log('parser regression checks passed');
+
+(async function(){
+  const source={width:200,height:100};
+  let enhancementPixels=new Uint8ClampedArray(source.width*source.height*4);
+  enhancementPixels.fill(255);
+  for(let y=30;y<60;y++)for(let x=120;x<180;x++){
+    const index=(y*source.width+x)*4;
+    enhancementPixels[index]=enhancementPixels[index+1]=enhancementPixels[index+2]=190;
+  }
+  context.document={createElement(){return {width:0,height:0,getContext(){return {
+    drawImage(){},fillRect(){},getImageData(){return {data:enhancementPixels};}
+  };}};}};
+  const twoCells={colBands:[{l:0,r:100,col:0},{l:100,r:200,col:1}],
+    rowBands:[{l:0,r:100,slots:[0]}]};
+  const clearTokens=[Object.assign(token('数据结构/1-17周',10,30,80),{score:0.99})];
+  const failedReread=await context.enhancePaddleCells(source,twoCells,clearTokens,{
+    async predict(){throw new Error('temporary OCR failure');}
+  });
+  const failureParsed=context.guardUnreadCells(source,twoCells,
+    context.buildGrid(failedReread,'sample.png',twoCells));
+  assert.ok(failureParsed.grid[1][0].some(course=>course.name.startsWith('待核对：')),
+    'faint text must require review when its local OCR fails instead of becoming a free slot');
+  assert.ok(failureParsed.grid[0][0].some(course=>course.name==='数据结构'),
+    'a failed local reread must retain a previously recognized course');
+
+  enhancementPixels=new Uint8ClampedArray(source.width*source.height*4);
+  enhancementPixels.fill(255);
+  const singleCell={colBands:[{l:0,r:200,col:0}],rowBands:[{l:0,r:100,slots:[0]}]};
+  const original=[
+    Object.assign(token('课程甲甲/1-8周/四教101/张三/',10,15,170),{score:0.91,h:16,y1:31,cy:23}),
+    Object.assign(token('课程乙乙/9-17周/四教102/李四/',10,55,170),{score:0.91,h:16,y1:71,cy:63})
+  ];
+  const beforeSwap=context.buildGrid(original,'sample.png',singleCell);
+  assert.deepEqual(Array.from(beforeSwap.grid[0][0],course=>course.name),['课程甲甲','课程乙乙'],
+    'the conflict fixture must start with two valid, distinguishable courses');
+  const swapped=await context.enhancePaddleCells(source,singleCell,original,{
+    async predict(){return [{items:[
+      {text:'课程甲甲/9-17周/四教101/张三/',score:0.99,poly:[[28,38],[368,38],[368,70],[28,70]]},
+      {text:'课程乙乙/1-8周/四教102/李四/',score:0.99,poly:[[28,118],[368,118],[368,150],[28,150]]}
+    ]}];}
+  });
+  const swappedParsed=context.buildGrid(swapped,'sample.png',singleCell);
+  assert.ok(swappedParsed.grid[0][0].some(course=>course.name.startsWith('待核对：')),
+    'swapping week ranges between the same two courses must require review even when the occupied-week union is unchanged');
+  console.log('local OCR enhancement regression checks passed');
+})().catch(error=>{console.error(error);process.exitCode=1;});
